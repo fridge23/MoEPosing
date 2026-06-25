@@ -31,8 +31,8 @@ def seq_id(motion: str) -> str:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="/home/pengfei/Downloads/poser_mle_orient")
-    ap.add_argument("--out", default="/home/pengfei/Downloads/poser_mle_orient/splits.json")
+    ap.add_argument("--data", default="data")
+    ap.add_argument("--out", default="data/splits.json")
     ap.add_argument("--test-kw", default="dip,totalcapture,imuposer")
     ap.add_argument("--val-frac", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=0)

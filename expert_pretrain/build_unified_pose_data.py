@@ -521,7 +521,7 @@ def convert_mobileposer(data_root: Path, writer: ShardWriter, args) -> Dict:
 
 def convert_dynaip_extract(data_root: Path, writer: ShardWriter, args) -> Dict:
     stats = {"sequences": 0, "skipped": 0, "frames": 0}
-    extract_root = Path('/home/pengfei/Downloads/dynaip/datasets/extract')
+    extract_root = Path('datasets/extract')
     for path in sorted(extract_root.glob('**/*.pt')):
         if 'cip' in path.parts and 'cip_full' not in path.parts:
             continue
@@ -880,7 +880,7 @@ def inspect_skipped_sources(data_root: Path) -> Dict:
             },
         },
         "dynaip_raw": {
-            "path": "/home/pengfei/Downloads/dynaip/datasets/raw",
+            "path": "datasets/raw",
             "reason": "Raw downloads are still in progress or not extracted; run DynaIP extract/process before adding these shards.",
         },
     }
@@ -945,8 +945,8 @@ def save_metadata(out_root: Path, writer: ShardWriter, args, stats: Dict):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-root", default="/home/pengfei/Downloads/data")
-    parser.add_argument("--output", default="/home/pengfei/Downloads/poser_mle_unified")
+    parser.add_argument("--data-root", default="data")
+    parser.add_argument("--output", default="data")
     parser.add_argument("--sources", default="mobileposer,dynaip,vidimu,ultra,ceti")
     parser.add_argument("--seq-len", type=int, default=300)
     parser.add_argument("--stride", type=int, default=150)

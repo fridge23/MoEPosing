@@ -129,7 +129,7 @@ def add_imu_noise(imu: torch.Tensor, imu_mask: torch.Tensor, acc_std: float, ori
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="/home/pengfei/Downloads/poser_mle_orient")
+    ap.add_argument("--data", default="data")
     ap.add_argument("--epochs", type=int, default=100, help="max epochs (a generous cap; "
                     "training stops earlier once val converges, see --patience)")
     ap.add_argument("--patience", type=int, default=15, help="0=off; else stop when the macro "
@@ -153,7 +153,7 @@ def main():
     ap.add_argument("--target-dim", type=int, default=0,
                     help="0=derive from --target; otherwise override for old checkpoints/experiments")
     ap.add_argument("--val-frac", type=float, default=0.05)
-    ap.add_argument("--manifest", default="/home/pengfei/Downloads/poser_mle_orient/splits.json",
+    ap.add_argument("--manifest", default="data/splits.json",
                     help="frozen sequence-level split manifest; leak-free. Set '' to fall back to "
                          "random window split + --holdout-kw keyword test set.")
     ap.add_argument("--loss", default="per_joint", choices=["per_joint", "pooled"],
@@ -195,7 +195,7 @@ def main():
                     help="sim-to-real: per-frame accelerometer Gaussian noise std (m/s^2) on train inputs")
     ap.add_argument("--ori-noise-deg", type=float, default=0.0,
                     help="sim-to-real: per-sequence orientation bias std (deg) on train inputs")
-    ap.add_argument("--save", default="/home/pengfei/Downloads/dynaip/weights/multiexpert.pt")
+    ap.add_argument("--save", default="weights/multiexpert.pt")
     ap.add_argument("--resume", default="",
                     help="resume model weights from a checkpoint; if <resume>_best.pt exists, "
                          "restore per-joint best snapshots from it")

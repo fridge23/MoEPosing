@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=/home/pengfei/Downloads/dynaip
-PY=/home/pengfei/Downloads/.codex-data-env/bin/python
-DATA=/home/pengfei/Downloads/poser_mle_posechange_full_60hz
-MANIFEST=/home/pengfei/Downloads/poser_mle_orient/splits.json
-LOGDIR=/home/pengfei/Downloads/logs
+ROOT=.
+PY=python
+DATA=data60hz
+MANIFEST=data/splits.json
+LOGDIR=logs
 ROOT_CKPT=$ROOT/weights/multiexpert_9d64.pt
 RESUME_CKPT=$ROOT/weights/multiexpert_self_change_9d64_best.pt
 SELF_CKPT=$ROOT/weights/multiexpert_self_change_9d64_wxyz0p1.pt

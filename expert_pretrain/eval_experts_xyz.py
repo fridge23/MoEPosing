@@ -18,7 +18,7 @@ from target_spec import slice_for, split_keys
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", default="/home/pengfei/Downloads/dynaip/weights/multiexpert_9d64_best.pt")
+    ap.add_argument("--ckpt", default="weights/multiexpert_9d64_best.pt")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--fps", type=float, default=0.0,
                     help="0=read target_fps from metadata.pt when available; used to convert "

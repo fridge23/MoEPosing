@@ -4,10 +4,10 @@
 # Each stage stops early on val convergence (--patience). Chain aborts on failure.
 set -euo pipefail
 
-PY=/home/pengfei/Downloads/.codex-data-env/bin/python
-ED=/home/pengfei/Downloads/dynaip/expert_pretrain
-W=/home/pengfei/Downloads/dynaip/weights
-L=/home/pengfei/Downloads/logs
+PY=python
+ED=expert_pretrain
+W=weights
+L=logs
 cd "$ED"
 
 stamp() { date '+%Y-%m-%d %H:%M:%S'; }

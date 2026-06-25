@@ -48,7 +48,7 @@ N_IMUS = len(CANONICAL_IMUS)
 N_JOINTS = len(CANONICAL_JOINTS)
 D = 64
 TARGET_DIM = EXPERT_RAW_OUTPUT_DIM  # 9
-PRIOR_PATH = "/home/pengfei/Downloads/student_kl_18to21_best_64.pth"
+PRIOR_PATH = "pretrained/student_kl_18to21_best_64.pth"
 
 
 def _ok(msg):

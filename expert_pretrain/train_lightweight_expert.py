@@ -353,9 +353,9 @@ def train_one_expert(joint_idx: int, args, encoder: SharedEncoder, device,
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data", default="/home/pengfei/Downloads/poser_mle_posechange_fixed_60hz")
+    ap.add_argument("--data", default="data60hz")
     ap.add_argument("--encoder-checkpoint",
-                    default="/home/pengfei/Downloads/dynaip/weights/shared_encoder/best_encoder.pt",
+                    default="weights/shared_encoder/best_encoder.pt",
                     help="Stage 1 shared encoder checkpoint")
     ap.add_argument("--freeze-encoder", action="store_true", default=True,
                     help="freeze the shared encoder (default: frozen)")
@@ -404,7 +404,7 @@ def main():
     ap.add_argument("--max-steps", type=int, default=0)
     # save
     ap.add_argument("--save-dir",
-                    default="/home/pengfei/Downloads/dynaip/weights/joint_experts_lightweight")
+                    default="weights/joint_experts_lightweight")
     args = ap.parse_args()
 
     if not args.target_joint and not args.train_all_experts:

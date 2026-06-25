@@ -4,13 +4,13 @@
 # best/convergence + LR schedule); ROOT starts fresh from its pre-fix best; then tests.
 set -euo pipefail
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-PY=/home/pengfei/Downloads/.codex-data-env/bin/python
-cd /home/pengfei/Downloads/dynaip/expert_pretrain
-D=/home/pengfei/Downloads/poser_mle_posechange_fixed_60hz
+PY=python
+cd expert_pretrain
+D=data60hz
 MAN=$D/splits.json
-W=/home/pengfei/Downloads/dynaip/weights
-L=/home/pengfei/Downloads/logs
-SMPL=/home/pengfei/Downloads/mobileposer_official/mobileposer/smpl/basicmodel_m.pkl
+W=weights
+L=logs
+SMPL=smpl_models/basicmodel_m.pkl
 
 BASE="--data $D --manifest $MAN --loss per_joint --loss-balance fixed \
   --lambda-orientation 1.0 --early-stop-metric total_loss --min-delta 1e-6 --patience 15 \

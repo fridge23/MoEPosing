@@ -1,4 +1,6 @@
+torch
 scipy
 numpy
-aitviewer
 tqdm
+pyyaml
+matplotlib

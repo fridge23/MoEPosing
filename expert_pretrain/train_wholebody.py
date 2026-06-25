@@ -180,8 +180,8 @@ def smoothness(pred: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="/home/pengfei/Downloads/poser_mle_orient")
-    ap.add_argument("--prior", default="/home/pengfei/Downloads/student_kl_18to21_best_64.pth")
+    ap.add_argument("--data", default="data")
+    ap.add_argument("--prior", default="pretrained/student_kl_18to21_best_64.pth")
     ap.add_argument("--experts", default="", help="Phase II: MultiExpert ckpt; known joints "
                                                   "use its predictions instead of GT")
     ap.add_argument("--joint-expert-dir", default="", help="Phase II: directory of per-joint "
@@ -236,7 +236,7 @@ def main():
                     help="use one fixed dataset-specific visible IMU set for validation/test")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--holdout-kw", default="dip,totalcapture,imuposer")
-    ap.add_argument("--manifest", default="/home/pengfei/Downloads/poser_mle_orient/splits.json",
+    ap.add_argument("--manifest", default="data/splits.json",
                     help="frozen sequence-level split manifest (leak-free); '' falls back to random split")
     ap.add_argument("--val-frac", type=float, default=0.05)
     ap.add_argument("--preload", action=argparse.BooleanOptionalAction, default=False,
@@ -245,7 +245,7 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--amp", default="bf16", choices=["bf16", "off"])
     ap.add_argument("--max-steps", type=int, default=0)
-    ap.add_argument("--save", default="/home/pengfei/Downloads/dynaip/weights/wholebody.pt")
+    ap.add_argument("--save", default="weights/wholebody.pt")
     args = ap.parse_args()
     if args.target_dim <= 0:
         args.target_dim = target_dim(args.target)

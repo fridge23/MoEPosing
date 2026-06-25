@@ -27,10 +27,10 @@ from target_spec import slice_for, split_keys
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="/home/pengfei/Downloads/poser_mle_orient")
-    ap.add_argument("--manifest", default="/home/pengfei/Downloads/poser_mle_orient/splits.json")
+    ap.add_argument("--data", default="data")
+    ap.add_argument("--manifest", default="data/splits.json")
     ap.add_argument("--split", default="test")
-    ap.add_argument("--ckpt", default="/home/pengfei/Downloads/dynaip/weights/multiexpert_orient_v4_best.pt")
+    ap.add_argument("--ckpt", default="weights/multiexpert_orient_v4_best.pt")
     ap.add_argument("--ks", default="2,3,4,5")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=0)

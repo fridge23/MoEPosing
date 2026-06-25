@@ -6,11 +6,11 @@
 # outputs using MobilePoser-style FK metrics.
 set -euo pipefail
 
-PY=${PY:-/home/pengfei/Downloads/.codex-data-env/bin/python}
-ED=${ED:-/home/pengfei/Downloads/dynaip/expert_pretrain}
-DATA=${DATA:-/home/pengfei/Downloads/poser_mle_posechange_60hz}
-W=${W:-/home/pengfei/Downloads/dynaip/weights}
-L=${L:-/home/pengfei/Downloads/logs}
+PY=${PY:-python}
+ED=${ED:-expert_pretrain}
+DATA=${DATA:-data60hz}
+W=${W:-weights}
+L=${L:-logs}
 
 cd "$ED"
 mkdir -p "$W" "$L"

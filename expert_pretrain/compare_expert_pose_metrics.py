@@ -191,7 +191,7 @@ def summarize_mobileposer(name: str, metric: MobilePoserMetricAccumulator):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="/home/pengfei/Downloads/poser_mle_posechange_60hz")
+    ap.add_argument("--data", default="data60hz")
     ap.add_argument("--manifest", default="", help="default: <data>/splits.json")
     ap.add_argument("--split", default="test", choices=["train", "val", "test"])
     ap.add_argument("--root-ckpt", default="", help="checkpoint trained with joint_orient_r6d,joint_delta")
@@ -206,7 +206,7 @@ def main():
     ap.add_argument("--fps", type=float, default=60.0)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--mobileposer-smpl",
-                    default="/home/pengfei/Downloads/mobileposer_official/mobileposer/smpl/basicmodel_m.pkl")
+                    default="smpl_models/basicmodel_m.pkl")
     args = ap.parse_args()
 
     ckpt_paths = OrderedDict()

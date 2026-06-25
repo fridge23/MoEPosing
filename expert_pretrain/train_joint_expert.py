@@ -315,8 +315,8 @@ def main():
     cfg = load_config(cli.config)
 
     args = {
-        "data": cli.data or deep_get(cfg, ["data"], "/home/pengfei/Downloads/poser_mle_orient"),
-        "manifest": cli.manifest if cli.manifest else deep_get(cfg, ["manifest"], "/home/pengfei/Downloads/poser_mle_orient/splits.json"),
+        "data": cli.data or deep_get(cfg, ["data"], "data"),
+        "manifest": cli.manifest if cli.manifest else deep_get(cfg, ["manifest"], "data/splits.json"),
         "save_dir": cli.save_dir or deep_get(cfg, ["expert_training", "save_dir"], "checkpoints/joint_experts"),
         "target": deep_get(cfg, ["target"], "joint_orient_r6d,joint_delta"),
         "mask_key": deep_get(cfg, ["mask_key"], "auto"),

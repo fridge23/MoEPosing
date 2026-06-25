@@ -99,8 +99,8 @@ def add_imu_noise(imu, imu_mask, acc_std, ori_deg):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--data", default="/home/pengfei/Downloads/poser_mle_posechange_fixed_60hz")
-    ap.add_argument("--prior", default="/home/pengfei/Downloads/student_kl_18to21_best_64.pth",
+    ap.add_argument("--data", default="data60hz")
+    ap.add_argument("--prior", default="pretrained/student_kl_18to21_best_64.pth",
                     help="pretrained 2-layer encoder checkpoint (Sapiens-distilled student_kl)")
     ap.add_argument("--pretrained-layers", type=int, default=2,
                     help="number of encoder layers to initialize from --prior")
@@ -154,7 +154,7 @@ def main():
     ap.add_argument("--log-every", type=int, default=100)
     ap.add_argument("--per-joint-log", default="")
     # save
-    ap.add_argument("--save-dir", default="/home/pengfei/Downloads/dynaip/weights/shared_encoder")
+    ap.add_argument("--save-dir", default="weights/shared_encoder")
     ap.add_argument("--resume", default="", help="path to latest.pt to resume training from")
     args = ap.parse_args()
 

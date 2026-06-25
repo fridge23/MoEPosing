@@ -9,6 +9,7 @@
 *.pt
 *.pth
 *.ckpt
+!/pretrained/student_kl_18to21_best_64.pth
 
 # Logs & results
 /logs/

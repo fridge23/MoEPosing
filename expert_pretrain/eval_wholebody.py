@@ -220,7 +220,7 @@ class MobilePoserMetricAccumulator:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", default="/home/pengfei/Downloads/dynaip/weights/wholebody_phase2_best.pt")
+    ap.add_argument("--ckpt", default="weights/wholebody_phase2_best.pt")
     ap.add_argument("--split", default="test", choices=["train", "val", "test"])
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--batch-size", type=int, default=0, help="0=use checkpoint batch size")
@@ -230,7 +230,7 @@ def main():
     ap.add_argument("--mobileposer-metrics", action=argparse.BooleanOptionalAction, default=True,
                     help="also report MobilePoser-style FK pose/mesh/jitter metrics")
     ap.add_argument("--mobileposer-smpl",
-                    default="/home/pengfei/Downloads/mobileposer_official/mobileposer/smpl/basicmodel_m.pkl",
+                    default="smpl_models/basicmodel_m.pkl",
                     help="SMPL model file used by the cloned official MobilePoser evaluator")
     ap.add_argument("--max-windows", type=int, default=0,
                     help="debug cap; 0 evaluates the full split")
@@ -246,7 +246,7 @@ def main():
         raise ValueError(f"Checkpoint target must include joint_orient_r6d,joint_delta, got {target_keys}")
     target_dim_value = int(_dict_get(a, "target_dim", target_dim(target_keys)))
 
-    data = _dict_get(a, "data", "/home/pengfei/Downloads/poser_mle_orient")
+    data = _dict_get(a, "data", "data")
     manifest = _dict_get(a, "manifest", f"{data.rstrip('/')}/splits.json")
     mask_key = _dict_get(a, "mask_key", "auto")
     eval_imus = int(_dict_get(a, "eval_imus", 3))
@@ -270,7 +270,7 @@ def main():
                     collate_fn=collate, pin_memory=(dev.type == "cuda"))
 
     model = WholeBodyPoser(
-        _dict_get(a, "prior", "/home/pengfei/Downloads/student_kl_18to21_best_64.pth"),
+        _dict_get(a, "prior", "pretrained/student_kl_18to21_best_64.pth"),
         lora_r=int(_dict_get(a, "lora_r", 8)),
         train_prior=_dict_get(a, "train_prior", "ln_lora"),
         residual=bool(_dict_get(a, "residual", True)),
