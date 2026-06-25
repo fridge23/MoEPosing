@@ -12,7 +12,8 @@ import numpy as np
 
 def train():
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    torch.cuda.set_device(device)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(device)
     random_seed = random.randint(1, 1000)
     random.seed(random_seed)
     np.random.seed(random_seed)    
@@ -29,7 +30,7 @@ def train():
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size")
     parser.add_argument("--datasets", type=list, default=['unipd', 'cip', 'andy', 'emokine', 'virginia'], help="Datasets used for training")
 
-    args = parser.parse_args(args=[])
+    args = parser.parse_args()
     os.makedirs(args.save_dir, exist_ok=True)
 
     print("Loading dataset.")

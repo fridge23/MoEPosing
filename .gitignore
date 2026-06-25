@@ -1,0 +1,31 @@
+# Data
+/datasets/raw/
+/datasets/extract/
+/datasets/work/
+/smpl_models/
+
+# Weights & checkpoints
+/weights/
+*.pt
+*.pth
+*.ckpt
+
+# Logs & results
+/logs/
+*.log
+*_perjoint.jsonl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+.venv/
+venv/

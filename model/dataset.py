@@ -36,7 +36,7 @@ class MotionDataset(Dataset):
             temp_data = {'imu': [], 'velocity': [], 'pose': []}
             for motion_name in tqdm(glob.glob(os.path.join(self.train_dir, dataset, '*.pt'))):
                 data = torch.load(motion_name)
-                
+
                 imu = data['imu']['imu'].view(-1, 6, 12)
                 temp_data['imu'].extend(torch.split(imu.view(imu.shape[0], 6, 12), self.seq_len))
 
@@ -49,6 +49,7 @@ class MotionDataset(Dataset):
                 velocity = data['joint']['velocity'][:, vel_mask].float()                
                 temp_data['velocity'].extend(torch.split(velocity.view(velocity.shape[0], -1, 3), self.seq_len))
                 # Discard pelvis, head, wrists and ankles, which have direct imu-readings
+                pose = data['joint']['orientation'].float()
                 pose = pose.view(pose.shape[0], -1, 6)[:, [0, 1, 2, 5, 6, 7, 8, 9, 10, 12, 13]]
                 temp_data['pose'].extend(torch.split(pose, self.seq_len))
                               
