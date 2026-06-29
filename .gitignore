@@ -30,3 +30,10 @@ __pycache__/
 .env
 .venv/
 venv/
+/data/
+# 额外排除的数据/压缩包
+/data/
+/data60hz/
+/data.zip
+/raw.zip
+*.zip
