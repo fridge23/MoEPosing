@@ -34,33 +34,65 @@ def seq_id(motion: str) -> str:
 
 
 def _resolve_shard_paths(root: str, split: Optional[str]) -> List[str]:
-    root_path = Path(root)
-    flat = sorted(glob.glob(str(root_path / "shard_*.pt")))
-    if flat:
-        return flat
-    if split:
-        nested = sorted(glob.glob(str(root_path / "*" / split / "shard_*.pt")))
+    """Resolve .pt data files from one or more comma-separated root directories.
+
+    Each root may contain:
+      - shard_*.pt files (legacy sharded format)
+      - *.pt per-dataset files written by process_new_datasets.py (any name)
+
+    Multiple roots are separated by commas, e.g. ``"data60hz,data_processed"``.
+    """
+    roots = [r.strip() for r in root.split(",") if r.strip()]
+    all_paths: List[str] = []
+    for r in roots:
+        rp = Path(r)
+        # 1. Legacy shards.
+        shards = sorted(glob.glob(str(rp / "shard_*.pt")))
+        if shards:
+            all_paths.extend(shards)
+            continue
+        # 2. Per-dataset files (any *.pt that are NOT shard files).
+        per_ds = sorted(glob.glob(str(rp / "*.pt")))
+        if per_ds:
+            all_paths.extend(per_ds)
+            continue
+        # 3. Nested shard directories.
+        if split:
+            nested = sorted(glob.glob(str(rp / "*" / split / "shard_*.pt")))
+            if nested:
+                all_paths.extend(nested)
+                continue
+        nested = sorted(glob.glob(str(rp / "*" / "*" / "shard_*.pt")))
         if nested:
-            return nested
-    nested = sorted(glob.glob(str(root_path / "*" / "*" / "shard_*.pt")))
-    if nested:
-        return nested
-    raise FileNotFoundError(f"No shard_*.pt in {root}")
+            all_paths.extend(nested)
+            continue
+        # Root found nothing — warn but don't raise so other roots still work.
+        import warnings
+        warnings.warn(f"No .pt files found in {r}")
+    if not all_paths:
+        raise FileNotFoundError(f"No .pt data files found in: {root}")
+    return all_paths
 
 
 def _validate_canonical_schema(root: str) -> None:
-    for name in ("metadata.pt", "manifest.json"):
-        path = Path(root) / name
-        if not path.exists():
-            continue
-        obj = torch.load(path, map_location="cpu") if path.suffix == ".pt" else json.load(open(path))
-        imus = obj.get("canonical_imus")
-        joints = obj.get("canonical_joints")
-        if imus is not None:
-            assert list(imus) == CANONICAL_IMUS, "Dataset IMU order differs from schema.CANONICAL_IMUS"
-        if joints is not None:
-            assert list(joints) == CANONICAL_JOINTS, "Dataset joint order differs from schema.CANONICAL_JOINTS"
-        return
+    """Validate schema for each comma-separated root directory."""
+    for r in root.split(","):
+        rp = Path(r.strip())
+        for name in ("metadata.pt", "manifest.json"):
+            path = rp / name
+            if not path.exists():
+                continue
+            obj = (torch.load(path, map_location="cpu")
+                   if path.suffix == ".pt" else json.load(open(path)))
+            imus   = obj.get("canonical_imus")
+            joints = obj.get("canonical_joints")
+            if imus is not None:
+                assert list(imus) == CANONICAL_IMUS, \
+                    f"IMU order in {path} differs from schema.CANONICAL_IMUS"
+            if joints is not None:
+                assert list(joints) == CANONICAL_JOINTS, \
+                    f"Joint order in {path} differs from schema.CANONICAL_JOINTS"
+            break  # found and validated one metadata file for this root
 
 
 def _stable_seed(seed: int, epoch: int, batch_idx: int, dataset_name: str,

@@ -37,3 +37,4 @@ venv/
 /data.zip
 /raw.zip
 *.zip
+/data_processed/
