@@ -332,19 +332,47 @@ class SharedEncoderPretrainModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 class LightweightJointExpert(nn.Module):
-    """Per-joint expert that reads one joint's frozen encoder output [B,T,d].
+    """Per-joint expert with access to the FULL shared context.
 
-    The caller slices encoder_output[:,:,j,:] for this joint before passing it.
-    Architecture: 2-layer temporal TransformerEncoder + MLP head.
-    Output: [B, T, target_dim]  (9 = 6D orientation + 3D motion delta).
+    To give every joint (including ones whose own IMU is absent — the failure
+    mode of ``mask_position="after"``, where most encoder tokens collapse to a
+    constant mask token) full cross-joint / cross-sensor knowledge, each expert
+    reads BOTH:
+
+      * the full encoder output    [B, T, n_joints, d]
+      * the full masked raw IMU    [B, T, n_imus, imu_dim]  (+ visibility mask)
+
+    A single learnable joint query cross-attends over all (n_joints + n_imus)
+    context tokens per frame, then a temporal Transformer + head predicts this
+    joint's 9D target (6D orientation + 3D motion delta).  Output: [B, T, dim].
+
+    Works identically for both ``before`` and ``after`` encoders, so the same
+    Stage-2 code trains experts on either Stage-1 variant.
     """
 
     def __init__(self, d: int = 64, nhead: int = 4, ff: int = 128,
                  num_layers: int = 2, target_dim: int = EXPERT_RAW_OUTPUT_DIM,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1, n_joints: int = len(CANONICAL_JOINTS),
+                 n_imus: int = len(CANONICAL_IMUS), imu_dim: int = 12,
+                 max_len: int = 1024):
         super().__init__()
         self.d = d
         self.target_dim = target_dim
+        self.n_joints = n_joints
+        self.n_imus = n_imus
+        self.imu_dim = imu_dim
+        # raw masked-IMU projection into token space + positional tags so the
+        # cross-attention query can tell tokens apart (attention is order-free).
+        self.imu_proj = nn.Linear(imu_dim, d)
+        self.imu_embed = nn.Embedding(n_imus, d)
+        self.joint_embed = nn.Embedding(n_joints, d)
+        # this expert's learnable query over the full per-frame context
+        self.query = nn.Parameter(torch.randn(d) * 0.02)
+        self.context_layer = nn.TransformerDecoderLayer(
+            d_model=d, nhead=nhead, dim_feedforward=ff,
+            batch_first=True, dropout=dropout,
+        )
+        self.pe = SinusoidalPE(d, max_len)
         self.temporal = nn.TransformerEncoder(
             _encoder_layer(d, nhead, ff, dropout),
             num_layers=num_layers,
@@ -354,21 +382,40 @@ class LightweightJointExpert(nn.Module):
             nn.Dropout(dropout), nn.Linear(d, target_dim),
         )
 
-    def forward(self, shared_repr: torch.Tensor,
+    def forward(self, encoder_output: torch.Tensor, imu: torch.Tensor,
+                imu_mask: torch.Tensor,
                 lengths: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """shared_repr [B,T,d] -> [B,T,target_dim]."""
+        """encoder_output [B,T,J,d], imu [B,T,S,imu_dim], imu_mask [B,S]
+        -> [B,T,target_dim] for this expert's joint."""
+        b, t, j, d = encoder_output.shape
+        s = imu.shape[2]
+        enc = encoder_output + self.joint_embed(
+            torch.arange(j, device=encoder_output.device),
+        ).view(1, 1, j, d)
+        imu_tok = self.imu_proj(imu) + self.imu_embed(
+            torch.arange(s, device=imu.device),
+        ).view(1, 1, s, d)
+        context = torch.cat([enc, imu_tok], dim=2).reshape(b * t, j + s, d)
+        # mask non-visible IMU tokens out of cross-attention (zeros carry no
+        # signal); encoder tokens are always attendable so memory is never empty.
+        mem_pad = torch.zeros(b, t, j + s, dtype=torch.bool, device=imu.device)
+        mem_pad[:, :, j:] = ~imu_mask.bool().view(b, 1, s)
+        mem_pad = mem_pad.reshape(b * t, j + s)
+        query = self.query.view(1, 1, d).expand(b * t, 1, d)
+        ctx = self.context_layer(query, context, memory_key_padding_mask=mem_pad)
+        x = self.pe(ctx.reshape(b, t, d))
         pad = None
         if lengths is not None:
-            t = shared_repr.shape[1]
-            pad = (torch.arange(t, device=shared_repr.device).view(1, t)
+            pad = (torch.arange(t, device=x.device).view(1, t)
                    >= lengths.view(-1, 1))
-        x = self.temporal(shared_repr, src_key_padding_mask=pad)
+        x = self.temporal(x, src_key_padding_mask=pad)
         return self.head(x)
 
-    def forward_dict(self, shared_repr: torch.Tensor,
+    def forward_dict(self, encoder_output: torch.Tensor, imu: torch.Tensor,
+                     imu_mask: torch.Tensor,
                      lengths: Optional[torch.Tensor] = None
                      ) -> Dict[str, torch.Tensor]:
-        pred = self.forward(shared_repr, lengths)
+        pred = self.forward(encoder_output, imu, imu_mask, lengths)
         return split_expert_prediction(pred)
 
 
@@ -377,36 +424,46 @@ class LightweightJointExpert(nn.Module):
 # ---------------------------------------------------------------------------
 
 class MultiLightweightExpert(nn.Module):
-    """28 lightweight joint experts sharing a frozen encoder."""
+    """28 lightweight joint experts sharing a frozen encoder.
+
+    Each expert reads the full encoder output + full masked IMU (see
+    :class:`LightweightJointExpert`), so they are interchangeable across
+    ``before``/``after`` Stage-1 encoders.
+    """
 
     def __init__(self, n_joints: int = len(CANONICAL_JOINTS), d: int = 64,
                  nhead: int = 4, ff: int = 128, num_layers: int = 2,
-                 target_dim: int = EXPERT_RAW_OUTPUT_DIM, dropout: float = 0.1):
+                 target_dim: int = EXPERT_RAW_OUTPUT_DIM, dropout: float = 0.1,
+                 n_imus: int = len(CANONICAL_IMUS), imu_dim: int = 12):
         super().__init__()
         self.n_joints = n_joints
         self.target_dim = target_dim
         self.experts = nn.ModuleList([
-            LightweightJointExpert(d, nhead, ff, num_layers, target_dim, dropout)
+            LightweightJointExpert(d, nhead, ff, num_layers, target_dim, dropout,
+                                   n_joints=n_joints, n_imus=n_imus, imu_dim=imu_dim)
             for _ in range(n_joints)
         ])
 
-    def forward(self, shared_repr: torch.Tensor,
+    def forward(self, encoder_output: torch.Tensor, imu: torch.Tensor,
+                imu_mask: torch.Tensor,
                 lengths: Optional[torch.Tensor] = None,
                 active: Optional[Sequence[int]] = None) -> torch.Tensor:
-        """Run selected (or all) experts on per-joint encoder output.
+        """Run selected (or all) experts on the full shared context.
 
-        shared_repr: [B, T, 28, d] from SharedEncoder.
+        encoder_output [B,T,28,d], imu [B,T,15,imu_dim], imu_mask [B,15].
         Returns [B, T, len(active), target_dim].
         """
         idxs = range(self.n_joints) if active is None else active
-        outs = [self.experts[j](shared_repr[:, :, j, :], lengths) for j in idxs]
+        outs = [self.experts[j](encoder_output, imu, imu_mask, lengths)
+                for j in idxs]
         return torch.stack(outs, dim=2)
 
-    def forward_dict(self, shared_repr: torch.Tensor,
+    def forward_dict(self, encoder_output: torch.Tensor, imu: torch.Tensor,
+                     imu_mask: torch.Tensor,
                      lengths: Optional[torch.Tensor] = None,
                      active: Optional[Sequence[int]] = None
                      ) -> Dict[str, torch.Tensor]:
-        pred = self.forward(shared_repr, lengths, active)
+        pred = self.forward(encoder_output, imu, imu_mask, lengths, active)
         return split_expert_prediction(pred)
 
 
@@ -517,7 +574,8 @@ def selective_inference(
       valid_mask:   [B, 28]
     """
     shared = encoder(imu, imu_mask, lengths)
-    expert_out = experts(shared, lengths, active=list(selected_joints))
+    expert_out = experts(shared, imu, imu_mask, lengths,
+                         active=list(selected_joints))
     result = {
         "shared_repr": shared,
         "expert_outputs": expert_out,

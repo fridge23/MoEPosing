@@ -38,16 +38,22 @@ TC_RAW_JOINT_MAP = {
     "LeftLeg": "LeftLowerLeg", "LeftFoot": "LeftFoot",
 }
 
-# TotalCapture IMU pkl: 6 sensors in MobilePoser order
-TC_IMU_NAMES = ["LeftForeArm", "RightForeArm", "LeftUpperLeg", "RightUpperLeg", "Head", "Pelvis"]
+# TotalCapture IMU pkl: 6 sensors. Leg sensors are on the LOWER leg (shin),
+# verified empirically (rotation-angle corr LowerLeg ~0.85 >> UpperLeg ~0.53).
+TC_IMU_NAMES = ["LeftForeArm", "RightForeArm", "LeftLowerLeg", "RightLowerLeg", "Head", "Pelvis"]
 
-# DIP_IMU: 17 sensor order (from DIP-IMU paper / standard Xsens MVN layout)
+# DIP_IMU 17-sensor order — Xsens MVN standard layout, verified empirically by
+# matching each sensor's per-frame global rotation-angle to the SMPL GT joints
+# (4 subjects, corr 0.9-1.0). Indices 3,4 = shoulders (no canonical IMU slot).
 DIP_17_IMU_NAMES = [
-    "Head", "T8", "Pelvis",
-    "LeftUpperArm", "RightUpperArm", "LeftForeArm", "RightForeArm",
-    "LeftUpperLeg", "RightUpperLeg", "LeftLowerLeg", "RightLowerLeg",
-    "LeftFoot", "RightFoot", "LeftHand", "RightHand",
-    "LeftToe_skip", "RightToe_skip",
+    "Head", "T8", "Pelvis",                    # 0,1,2
+    None, None,                                # 3,4  = L/R shoulder (no slot)
+    "LeftUpperArm", "RightUpperArm",           # 5,6
+    "LeftForeArm", "RightForeArm",             # 7,8
+    "LeftUpperLeg", "RightUpperLeg",           # 9,10
+    "LeftLowerLeg", "RightLowerLeg",           # 11,12
+    "LeftHand", "RightHand",                   # 13,14
+    "LeftFoot", "RightFoot",                   # 15,16
 ]
 
 
@@ -333,7 +339,7 @@ def process_dip_imu(data_root: Path, writer: ShardWriter, args):
             imu = torch.zeros(t, len(CANONICAL_IMUS), 12)
             imu_mask = torch.zeros(len(CANONICAL_IMUS), dtype=torch.bool)
             for src_i, name in enumerate(DIP_17_IMU_NAMES[:imu_raw.shape[1]]):
-                if name.endswith("_skip"):
+                if name is None:
                     continue
                 if name in IMU_INDEX:
                     dst = IMU_INDEX[name]

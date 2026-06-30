@@ -139,7 +139,8 @@ def train_one_expert(joint_idx: int, args, encoder: SharedEncoder, device,
     expert = LightweightJointExpert(
         d=args.hidden, nhead=args.nhead, ff=args.ff,
         num_layers=args.expert_layers, target_dim=args.target_dim,
-        dropout=0.1,
+        dropout=0.1, n_joints=len(CANONICAL_JOINTS),
+        n_imus=len(CANONICAL_IMUS), imu_dim=12,
     ).to(device)
     n_params = sum(p.numel() for p in expert.parameters())
     print(f"[expert] {joint_name}: {n_params/1e3:.1f}k params, "
@@ -217,7 +218,9 @@ def train_one_expert(joint_idx: int, args, encoder: SharedEncoder, device,
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
             with torch.no_grad():
                 shared = encoder(imu, imu_mask, lengths)  # [B, T, 28, d]
-            pred = expert(shared[:, :, joint_idx, :], lengths)  # [B, T, 9]
+            # expert reads the FULL encoder output + full masked IMU, not just
+            # this joint's slice, so non-visible joints still get full context.
+            pred = expert(shared, imu, imu_mask, lengths)  # [B, T, 9]
             target_j = target[:, :, joint_idx, :]  # [B, T, 9]
             mask_j = mask[:, joint_idx]  # [B]
 
@@ -435,8 +438,11 @@ def main():
         num_layers=int(enc_args.get("encoder_layers", 4)),
         num_spatial_layers=int(enc_args.get("spatial_layers", 2)),
         dropout=0.1,
+        mask_position=str(enc_args.get("mask_position", "before")),
     )
     encoder.load_state_dict(ckpt["encoder"])
+    args.mask_position = str(enc_args.get("mask_position", "before"))
+    print(f"[encoder] mask_position={args.mask_position}")
     encoder.to(device).eval()
     if args.freeze_encoder:
         for p in encoder.parameters():

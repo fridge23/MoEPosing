@@ -148,15 +148,18 @@ def test_expert_forward(device):
     expert = LightweightJointExpert(d=D, num_layers=2,
                                     target_dim=TARGET_DIM).to(device)
     B, T = 4, 32
-    shared = torch.randn(B, T, D, device=device)
+    enc_out = torch.randn(B, T, N_JOINTS, D, device=device)
+    imu = torch.randn(B, T, N_IMUS, 12, device=device)
+    mask = torch.ones(B, N_IMUS, dtype=torch.bool, device=device)
+    mask[:, 5:] = False
     lengths = torch.full((B,), T, dtype=torch.long, device=device)
-    out = expert(shared, lengths)
+    out = expert(enc_out, imu, mask, lengths)
     assert out.shape == (B, T, TARGET_DIM), \
         f"Expected {(B,T,TARGET_DIM)}, got {out.shape}"
-    _ok(f"Expert output shape {tuple(out.shape)}")
+    _ok(f"Expert output shape {tuple(out.shape)} (full encoder + masked IMU)")
 
     # check forward_dict
-    d = expert.forward_dict(shared, lengths)
+    d = expert.forward_dict(enc_out, imu, mask, lengths)
     assert d["orientation_6d"].shape == (B, T, 6)
     assert d["motion_delta"].shape == (B, T, 3)
     _ok("Expert forward_dict: orientation_6d [B,T,6], motion_delta [B,T,3]")
@@ -169,15 +172,18 @@ def test_multi_expert_active(device):
                                    num_layers=2).to(device)
     B, T = 4, 32
     shared = torch.randn(B, T, N_JOINTS, D, device=device)
+    imu = torch.randn(B, T, N_IMUS, 12, device=device)
+    mask = torch.ones(B, N_IMUS, dtype=torch.bool, device=device)
+    mask[:, 5:] = False
     lengths = torch.full((B,), T, dtype=torch.long, device=device)
 
     # all experts
-    out_all = multi(shared, lengths)
+    out_all = multi(shared, imu, mask, lengths)
     assert out_all.shape == (B, T, N_JOINTS, TARGET_DIM)
 
     # selected experts
     active = [0, 3, 7, 20]
-    out_sel = multi(shared, lengths, active=active)
+    out_sel = multi(shared, imu, mask, lengths, active=active)
     assert out_sel.shape == (B, T, len(active), TARGET_DIM)
     _ok(f"MultiExpert: all={tuple(out_all.shape)}, active({len(active)})={tuple(out_sel.shape)}")
     return True
@@ -205,7 +211,7 @@ def test_stage2_training_step(device):
 
     with torch.no_grad():
         shared = enc(imu, mask, lengths)  # [B, T, 28, d]
-    pred = expert(shared[:, :, 0, :], lengths)  # joint 0's representation
+    pred = expert(shared, imu, mask, lengths)  # full context -> joint output
     loss = (pred - target_j).pow(2).mean()
     opt.zero_grad()
     loss.backward()

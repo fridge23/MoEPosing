@@ -63,13 +63,20 @@ IMU_INDEX = {n: i for i, n in enumerate(CANONICAL_IMUS)}
 # DIP_IMU -- from data/raw_data/DIP_IMU/
 # ---------------------------------------------------------------------------
 
-# DIP-IMU paper sensor order (17 Xsens sensors, 2 toe sensors skipped).
+# DIP-IMU 17-sensor order — Xsens MVN standard layout, verified empirically by
+# matching each sensor's per-frame global rotation-angle to the SMPL GT joints
+# (4 subjects, corr 0.9-1.0). Indices 3,4 are the shoulders (no canonical IMU
+# slot -> None). The previous order here was scrambled (arm data in leg slots,
+# real foot sensors 15,16 dropped); this is the corrected version.
 DIP_17_IMU_NAMES = [
-    "Head", "T8", "Pelvis",
-    "LeftUpperArm", "RightUpperArm", "LeftForeArm", "RightForeArm",
-    "LeftUpperLeg", "RightUpperLeg", "LeftLowerLeg", "RightLowerLeg",
-    "LeftFoot", "RightFoot", "LeftHand", "RightHand",
-    None, None,  # LeftToe / RightToe — not in CANONICAL_IMUS
+    "Head", "T8", "Pelvis",                    # 0,1,2
+    None, None,                                # 3,4  = L/R shoulder (no slot)
+    "LeftUpperArm", "RightUpperArm",           # 5,6
+    "LeftForeArm", "RightForeArm",             # 7,8
+    "LeftUpperLeg", "RightUpperLeg",           # 9,10
+    "LeftLowerLeg", "RightLowerLeg",           # 11,12
+    "LeftHand", "RightHand",                   # 13,14
+    "LeftFoot", "RightFoot",                   # 15,16
 ]
 
 SMPL_PARENTS = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19, 20, 21]
@@ -435,7 +442,8 @@ KINECT_JOINTS = [
 KINECT_TO_CANONICAL = {
     "SpineBase":    "Pelvis",
     "SpineMid":     "T8",           # approximate (mid spine ≈ T8 for our skeleton)
-    "SpineShoulder":"Neck",
+    "SpineShoulder":"Spine3",       # base of neck between shoulders -> topmost thoracic
+                                    # (was wrongly "Neck", colliding with Kinect Neck)
     "Neck":         "Neck",
     "Head":         "Head",
     "ShoulderLeft": "LeftShoulder",
@@ -467,8 +475,133 @@ CZU_ACTIONS = {
 }
 
 
+# CZU 10-sensor order from the authors' Sample Code/show_inertial.py.
+CZU_SENSOR_TO_CANONICAL = [
+    "T8",            # 0 chest
+    "Pelvis",        # 1 abdomen
+    "LeftForeArm",   # 2 left elbow
+    "LeftHand",      # 3 left wrist
+    "RightForeArm",  # 4 right elbow
+    "RightHand",     # 5 right wrist
+    "LeftLowerLeg",  # 6 left knee
+    "LeftFoot",      # 7 left ankle
+    "RightLowerLeg", # 8 right knee
+    "RightFoot",     # 9 right ankle
+]
+
+# earth frame (Madgwick: +z = up) -> SMPL world frame (+y = up), so CZU's
+# gravity-down aligns with the other datasets' (-y). Yaw stays unreferenced.
+_CZU_Z2Y = np.array([[1.0, 0.0, 0.0],
+                     [0.0, 0.0, 1.0],
+                     [0.0, -1.0, 0.0]], dtype=np.float64)
+
+
+def _madgwick_imu(gyro, accel, dt, beta=0.1):
+    """IMU-only Madgwick fusion (accel+gyro, NO magnetometer). gyro [N,3] rad/s,
+    accel [N,3] any unit -> quaternions [N,4] (w,x,y,z), q = R_body_from_earth.
+    Roll/pitch are gravity-referenced; yaw is unobservable (drifts)."""
+    gl = gyro.tolist()
+    al = accel.tolist()
+    out = np.zeros((len(gl), 4))
+    # initialize from the first accelerometer sample (tilt; yaw=0) so the filter
+    # starts gravity-aligned instead of converging slowly from identity.
+    a0 = al[0]
+    n0 = (a0[0]*a0[0] + a0[1]*a0[1] + a0[2]*a0[2]) ** 0.5
+    if n0 > 1e-8:
+        ax0, ay0, az0 = a0[0]/n0, a0[1]/n0, a0[2]/n0
+        q1, q2, q3, q4 = 1.0 + az0, -ay0, ax0, 0.0
+        nq = (q1*q1 + q2*q2 + q3*q3 + q4*q4) ** 0.5
+        q1, q2, q3, q4 = (q1/nq, q2/nq, q3/nq, q4/nq) if nq > 1e-8 else (1.0, 0.0, 0.0, 0.0)
+    else:
+        q1, q2, q3, q4 = 1.0, 0.0, 0.0, 0.0
+    for t in range(len(gl)):
+        gx, gy, gz = gl[t]
+        ax, ay, az = al[t]
+        n = (ax*ax + ay*ay + az*az) ** 0.5
+        s1 = s2 = s3 = s4 = 0.0
+        if n > 1e-8:
+            ax, ay, az = ax/n, ay/n, az/n
+            f1 = 2*(q2*q4 - q1*q3) - ax
+            f2 = 2*(q1*q2 + q3*q4) - ay
+            f3 = 2*(0.5 - q2*q2 - q3*q3) - az
+            s1 = -2*q3*f1 + 2*q2*f2
+            s2 = 2*q4*f1 + 2*q1*f2 - 4*q2*f3
+            s3 = -2*q1*f1 + 2*q4*f2 - 4*q3*f3
+            s4 = 2*q2*f1 + 2*q3*f2
+            sn = (s1*s1 + s2*s2 + s3*s3 + s4*s4) ** 0.5
+            if sn > 1e-8:
+                s1, s2, s3, s4 = s1/sn, s2/sn, s3/sn, s4/sn
+        qd1 = 0.5*(-q2*gx - q3*gy - q4*gz) - beta*s1
+        qd2 = 0.5*( q1*gx + q3*gz - q4*gy) - beta*s2
+        qd3 = 0.5*( q1*gy - q2*gz + q4*gx) - beta*s3
+        qd4 = 0.5*( q1*gz + q2*gy - q3*gx) - beta*s4
+        q1 += qd1*dt; q2 += qd2*dt; q3 += qd3*dt; q4 += qd4*dt
+        nq = (q1*q1 + q2*q2 + q3*q3 + q4*q4) ** 0.5
+        q1, q2, q3, q4 = q1/nq, q2/nq, q3/nq, q4/nq
+        out[t] = (q1, q2, q3, q4)
+    return out
+
+
+def _resample_rows(arr, t_out):
+    """Linear-resample [N,K] -> [t_out,K] on a normalized time axis."""
+    n = arr.shape[0]
+    if n == t_out:
+        return arr
+    xp = np.linspace(0.0, 1.0, n)
+    xs = np.linspace(0.0, 1.0, t_out)
+    return np.stack([np.interp(xs, xp, arr[:, k]) for k in range(arr.shape[1])], axis=1)
+
+
+def _czu_real_imu(zf, sensor_entry, t_skel, fps):
+    """Build canonical IMU [t_skel,15,12] from CZU's 10 real MPU9250 sensors.
+    Orientation via Madgwick (yaw unreferenced); real free-acceleration rotated
+    into the fused frame, de-gravitied, and mapped to the SMPL (+y up) frame.
+    Each sensor is resampled (normalized time) to the skeleton length."""
+    import scipy.io as sio
+    imu = torch.zeros(t_skel, len(CANONICAL_IMUS), 12)
+    mask = torch.zeros(len(CANONICAL_IMUS), dtype=torch.bool)
+    if sensor_entry is None:
+        return imu, mask
+    try:
+        mat = sio.loadmat(io.BytesIO(zf.read(sensor_entry)), squeeze_me=True)
+    except Exception:
+        return imu, mask
+    sensor = mat.get("sensor")
+    if sensor is None or len(sensor) < len(CZU_SENSOR_TO_CANONICAL):
+        return imu, mask
+    duration = t_skel / float(fps)              # seconds (skeleton @ fps)
+    g_earth = np.array([0.0, 0.0, 9.80665])
+    for src_i, name in enumerate(CZU_SENSOR_TO_CANONICAL):
+        dst = IMU_INDEX.get(name)
+        if dst is None:
+            continue
+        s = np.asarray(sensor[src_i], dtype=np.float64)
+        if s.ndim != 2 or s.shape[0] < 5 or s.shape[1] < 6:
+            continue
+        acc_g = s[:, 0:3]                        # accelerometer, units of g
+        gyro = np.deg2rad(s[:, 3:6])            # gyroscope deg/s -> rad/s
+        n = s.shape[0]
+        dt = duration / max(n - 1, 1)
+        quats = _madgwick_imu(gyro, acc_g, dt)               # [n,4] R_body_from_earth
+        M = quat_to_mat(torch.from_numpy(quats).float()).numpy().reshape(-1, 3, 3)
+        Mt = np.transpose(M, (0, 2, 1))                       # earth_from_body
+        a_body = acc_g * 9.80665                              # m/s^2, body frame
+        a_free = np.einsum("nij,nj->ni", Mt, a_body) - g_earth
+        # resample to skeleton frames, then map earth(z-up) -> world(y-up)
+        q_rs = _resample_rows(quats, t_skel)
+        q_rs /= np.linalg.norm(q_rs, axis=1, keepdims=True).clip(1e-8)
+        M_rs = quat_to_mat(torch.from_numpy(q_rs).float()).numpy().reshape(-1, 3, 3)
+        Mt_rs = np.transpose(M_rs, (0, 2, 1))
+        Mt_world = _CZU_Z2Y[None] @ Mt_rs
+        a_world = (_CZU_Z2Y[None] @ _resample_rows(a_free, t_skel)[..., None]).squeeze(-1)
+        imu[:, dst, :9] = torch.from_numpy(Mt_world.reshape(t_skel, 9)).float()
+        imu[:, dst, 9:] = torch.from_numpy(a_world).float()
+        mask[dst] = True
+    return imu, mask
+
+
 def convert_czumhad(zip_path: Path, writer, args) -> Dict:
-    """Parse CZU-MHAD .mat files."""
+    """Parse CZU-MHAD .mat files (Kinect skeleton + 10 real MPU9250 IMUs)."""
     try:
         import scipy.io as sio
     except ImportError:
@@ -526,8 +659,17 @@ def convert_czumhad(zip_path: Path, writer, args) -> Dict:
                 stats["skipped"] += 1
                 continue
 
-            # Synthesize IMU from Kinect joint positions.
-            imu, imu_mask = synthesize_imu(joints, joint_mask, fps)
+            # Real IMU from the 10 MPU9250 sensors (accel+gyro -> Madgwick fusion).
+            imu, imu_mask = _czu_real_imu(zf, sensor_entries.get(fname), t_skel, fps)
+            quality = "primary_imu_fused"
+            desc = ("CZU-MHAD: Kinect V2 skeleton + 10 real MPU9250 IMUs; "
+                    "Madgwick-fused orientation (yaw unreferenced), real free-acc, "
+                    "resampled to skeleton frames")
+            if not imu_mask.any():
+                # fall back to synthesis only if the sensor file is missing/unreadable
+                imu, imu_mask = synthesize_imu(joints, joint_mask, fps)
+                quality = "synthetic_imu"
+                desc = "CZU-MHAD: Kinect V2 skeleton; IMU synthesized from positions (no sensor file)"
             if not imu_mask.any():
                 stats["skipped"] += 1
                 continue
@@ -541,8 +683,8 @@ def convert_czumhad(zip_path: Path, writer, args) -> Dict:
                 imu_mask,
                 joints,
                 joint_mask,
-                "synthetic_imu",
-                "Kinect V2 25-joint skeleton; IMU synthesized from positions",
+                quality,
+                desc,
                 {"activity": action, "subject": subj},
             )
             if seq is None:
@@ -560,8 +702,11 @@ def convert_czumhad(zip_path: Path, writer, args) -> Dict:
 # mm-fit -- from mm-fit.zip
 # ---------------------------------------------------------------------------
 
-# pose_3d dim layout: (3=xyz, T, 18) where [:, :, 0] = frame counter.
-# Slots 1-17 correspond to OpenPose 18-joint skeleton (COCO-style), minus Nose:
+# pose_3d dim layout: (3=xyz, T, 18) where [:, :, 0] = frame counter (verified:
+# values are monotonic +1; authors' dataset.py reads pose_3d[0,i,0] as the frame
+# index). Slots 1-17 = OpenPose BODY_18 (COCO) order minus Nose -- verified by
+# bone-length rigidity (arm bones CoV ~0.05 vs wrong-pairing controls ~0.2).
+# (mm-fit leg 3D is noisy/occluded, but the joint ORDER is correct.)
 MMFIT_JOINT_ORDER = [
     # slot index in pose_3d dim-2 : canonical joint name  (slot 0 = frame counter)
     None,               # 0: frame counter
@@ -586,10 +731,10 @@ MMFIT_JOINT_ORDER = [
 
 # IMU sensor keys in mm-fit and their canonical IMU slot.
 MMFIT_SENSORS = {
-    "sw_l": "LeftHand",     # smartwatch left wrist
-    "sw_r": "RightHand",    # smartwatch right wrist
-    "sp_r": "Pelvis",       # smartphone right hip pocket ≈ Pelvis
-    "eb_l": "Head",         # earbuds left ≈ Head (no better canonical slot)
+    "sw_l": "LeftHand",      # smartwatch, left wrist
+    "sw_r": "RightHand",     # smartwatch, right wrist
+    "sp_r": "RightUpperLeg", # smartphone in right trouser pocket ≈ right thigh
+    "eb_l": "Head",          # earbud, left ear ≈ Head (no better canonical slot)
 }
 
 
@@ -728,15 +873,26 @@ MRI_COCO_JOINTS = [
     "RightFoot",     # 16 RightAnkle
 ]
 
-# IMU placement in mRI dataset: wrists(2), ankles(2), chest(1), head(1).
-# Assumed order IMU0-5 based on typical sensor attachment (chest first for calibration).
+# IMU placement in mRI. The paper (arXiv:2210.08394 §3.1) states the six IMUs
+# are on "left wrist, right wrist, left knee, right knee, head, and pelvis" —
+# that fixes the placement SET. The paper's enumeration order is NOT the data
+# array's channel order, and the released code (action_localization loader)
+# treats IMU as a flat feature with no explicit channel naming, so the IMU0-5
+# index -> body-part map below was recovered empirically from the data:
+#   IMU1=LeftWrist, IMU2=RightWrist, IMU4=LeftKnee, IMU5=RightKnee
+#     -- each IMU's quaternion rotation-angle matches that GT limb's motion,
+#        strong & consistent across subjects (L/R per the GT COCO left/right).
+#   IMU0=Head, IMU3=Pelvis  -- the two trunk sensors, separated by "pelvis
+#        moves with the legs": IMU3's motion correlates with the knee IMUs more
+#        than IMU0's (mean 0.38 vs 0.32, 16/20 subjects). Moderate confidence.
+# (Previous mapping had chest+feet+swapped wrists — wrong on all 6 sensors.)
 MRI_IMU_PLACEMENT = [
-    "T8",            # IMU0: chest / sternum
-    "RightHand",     # IMU1: right wrist
-    "LeftHand",      # IMU2: left wrist
-    "RightFoot",     # IMU3: right ankle
-    "LeftFoot",      # IMU4: left ankle
-    "Head",          # IMU5: head
+    "Head",          # IMU0: head
+    "LeftHand",      # IMU1: left wrist
+    "RightHand",     # IMU2: right wrist
+    "Pelvis",        # IMU3: pelvis
+    "LeftLowerLeg",  # IMU4: left knee
+    "RightLowerLeg", # IMU5: right knee
 ]
 
 
@@ -913,8 +1069,116 @@ TC_RAW_JOINT_MAP = {
     "LeftLeg": "LeftLowerLeg", "LeftFoot": "LeftFoot",
 }
 
-# TotalCapture 6 IMU sensors (MobilePoser order, same as DIP paper convention)
-TC_IMU_NAMES = ["LeftForeArm", "RightForeArm", "LeftUpperLeg", "RightUpperLeg", "Head", "Pelvis"]
+# TotalCapture 6 IMU sensors. Leg sensors are on the LOWER leg (shin), verified
+# empirically: per-frame rotation-angle matches LowerLeg (corr ~0.85) far better
+# than UpperLeg (~0.53) across sequences. (The earlier "UpperLeg" followed
+# MobilePoser's phone-in-pocket joint_set [18,19,1,2,15,0], which is a virtual
+# placement, not where TotalCapture's physical Xsens sensors sit.)
+TC_IMU_NAMES = ["LeftForeArm", "RightForeArm", "LeftLowerLeg", "RightLowerLeg", "Head", "Pelvis"]
+
+# Original TotalCapture 13-IMU .sensors -> bone -> canonical IMU slot (README:
+# data/totalcapture/S*_imu.tar.gz). Adds sternum/upper-arms/upper-legs/feet on
+# top of the 6-sensor reduced pkl. Global bone orientation is recovered with the
+# per-sequence calibration: R^g_b = R_ig . R_i . R_ib^-1 (validated against the
+# Vicon GT bone motion, frame-delta corr 0.96-0.99 for rigid mounts).
+TC_13IMU_TO_CANONICAL = {
+    "Head": "Head", "Sternum": "T8", "Pelvis": "Pelvis",
+    "L_UpArm": "LeftUpperArm", "R_UpArm": "RightUpperArm",
+    "L_LowArm": "LeftForeArm", "R_LowArm": "RightForeArm",
+    "L_UpLeg": "LeftUpperLeg", "R_UpLeg": "RightUpperLeg",
+    "L_LowLeg": "LeftLowerLeg", "R_LowLeg": "RightLowerLeg",
+    "L_Foot": "LeftFoot", "R_Foot": "RightFoot",
+}
+
+
+def _tc_parse_sensors(txt):
+    """Parse a .sensors file -> (names, quats[T,13,4 wxyz], accel[T,13,3])."""
+    lines = txt.splitlines()
+    ns = int(lines[0].split()[0])
+    i, Q, A, names = 1, [], [], None
+    while i < len(lines):
+        if not lines[i].strip():
+            i += 1
+            continue
+        i += 1  # frame-number line
+        fq, fa, fn, ok = [], [], [], True
+        for _ in range(ns):
+            if i >= len(lines):
+                ok = False
+                break
+            p = lines[i].split(); i += 1
+            if len(p) < 8:
+                ok = False
+                break
+            fn.append(p[0]); v = [float(x) for x in p[1:8]]
+            fq.append(v[:4]); fa.append(v[4:7])
+        if not ok:
+            break
+        Q.append(fq); A.append(fa)
+        if names is None:
+            names = fn
+    return names, np.array(Q, np.float32), np.array(A, np.float32)
+
+
+def _tc_parse_calib(txt):
+    """Parse a calib file (quat stored x y z w) -> {sensor_name: R[3,3]}."""
+    out = {}
+    for line in txt.splitlines()[1:]:
+        p = line.split()
+        if len(p) < 5:
+            continue
+        x, y, z, w = (float(v) for v in p[1:5])
+        out[p[0]] = quat_to_mat(torch.tensor([w, x, y, z], dtype=torch.float32)).reshape(3, 3).numpy()
+    return out
+
+
+def _tc_build_13imu(names, quats, accel, Rib, Rig, t_target):
+    """13 sensors -> canonical IMU [t_target,15,12]: global bone orientation via
+    calibration + global free-acceleration (gravity removed as per-seq mean)."""
+    imu = torch.zeros(t_target, len(CANONICAL_IMUS), 12)
+    mask = torch.zeros(len(CANONICAL_IMUS), dtype=torch.bool)
+    if names is None or quats.shape[0] == 0:
+        return imu, mask
+    n = quats.shape[0]
+    R_i = quat_to_mat(torch.from_numpy(quats).float()).numpy().reshape(n, len(names), 3, 3)
+    for si, nm in enumerate(names):
+        canon = TC_13IMU_TO_CANONICAL.get(nm)
+        if canon is None or nm not in Rib or nm not in Rig:
+            continue
+        dst = IMU_INDEX.get(canon)
+        if dst is None:
+            continue
+        Rgi = np.einsum("ij,tjk->tik", Rig[nm], R_i[:, si])   # IMU in global frame
+        Rgb = np.einsum("tij,kj->tik", Rgi, Rib[nm])          # @ R_ib^-1 -> bone global
+        a_glob = np.einsum("tij,tj->ti", Rgi, accel[:, si])   # local acc -> global
+        a_free = a_glob - a_glob.mean(axis=0, keepdims=True)  # remove gravity + bias
+        m = min(n, t_target)
+        imu[:m, dst, :9] = torch.from_numpy(Rgb[:m].reshape(-1, 9)).float()
+        imu[:m, dst, 9:] = torch.from_numpy(a_free[:m]).float()
+        mask[dst] = True
+    return imu, mask
+
+
+def _tc_load_imu_tar(tar_path):
+    """Load one subject's *_imu.tar.gz -> {seq: (names,quats,accel,Rib,Rig)}."""
+    import tarfile
+    out = {}
+    if not tar_path.exists():
+        return out
+    with tarfile.open(tar_path, "r:gz") as tf:
+        members = {m.name: m for m in tf.getmembers() if m.isfile()}
+        for sname in [n for n in members if n.endswith(".sensors")]:
+            bone = sname.replace("_Xsens.sensors", "_calib_imu_bone.txt")
+            ref = sname.replace("_Xsens.sensors", "_calib_imu_ref.txt")
+            if bone not in members or ref not in members:
+                continue
+            base = Path(sname).name.replace("_Xsens.sensors", "")  # s1_acting1
+            seq = base.split("_", 1)[1] if "_" in base else base    # acting1
+            names, Q, A = _tc_parse_sensors(tf.extractfile(members[sname]).read().decode("utf-8", "replace"))
+            Rib = _tc_parse_calib(tf.extractfile(members[bone]).read().decode("utf-8", "replace"))
+            Rig = _tc_parse_calib(tf.extractfile(members[ref]).read().decode("utf-8", "replace"))
+            out[seq] = (names, Q, A, Rib, Rig)
+    return out
 
 
 def _parse_tc_txt(path: Path, values_per_joint: int) -> Tuple[Optional[torch.Tensor], List[str]]:
@@ -954,6 +1218,7 @@ def convert_totalcapture(raw_data_root: Path, writer, args) -> Dict:
     tc_root = raw_data_root / "TotalCapture"
     raw_root = tc_root / "raw"
     imu_root = tc_root / "IMU"
+    tc_imu_dir = raw_data_root.parent / "totalcapture"   # 13-IMU .sensors tarballs
     stats = {"sequences": 0, "skipped": 0, "frames": 0}
 
     if not tc_root.exists():
@@ -964,6 +1229,7 @@ def convert_totalcapture(raw_data_root: Path, writer, args) -> Dict:
         if not subject_dir.is_dir():
             continue
         subject = subject_dir.name.lower()  # S1 → s1
+        imu13 = _tc_load_imu_tar(tc_imu_dir / f"{subject_dir.name}_imu.tar.gz")
 
         for seq_dir in sorted(subject_dir.iterdir()):
             if not seq_dir.is_dir():
@@ -993,10 +1259,17 @@ def convert_totalcapture(raw_data_root: Path, writer, args) -> Dict:
             canon_ori_names = [TC_RAW_JOINT_MAP.get(n, n) for n in ori_names]
             orient6, orient_mask = root_normalized_r6d(rot_mats, canon_ori_names)
 
-            # Real IMU data from pkl
-            imu_pkl = imu_root / f"{subject}_{seq_name}.pkl"
+            # Real IMU: prefer the original 13-sensor .sensors (global bone
+            # orientation via per-sequence calibration); fall back to the
+            # 6-sensor pkl, then to synthesis.
             imu, imu_mask = zeros_imu(t)
-            if imu_pkl.exists():
+            quality = "primary"
+            desc = "TotalCapture: 13 real Xsens IMUs (calibrated global bone ori) + global skeleton at 60Hz"
+            if seq_name in imu13:
+                names_, Q_, A_, Rib_, Rig_ = imu13[seq_name]
+                imu, imu_mask = _tc_build_13imu(names_, Q_, A_, Rib_, Rig_, t)
+            imu_pkl = imu_root / f"{subject}_{seq_name}.pkl"
+            if not imu_mask.any() and imu_pkl.exists():
                 with open(imu_pkl, "rb") as f:
                     imu_data = pickle.load(f, encoding="latin1")
                 acc = torch.tensor(imu_data["acc"], dtype=torch.float32)  # [T, 6, 3]
@@ -1009,8 +1282,11 @@ def convert_totalcapture(raw_data_root: Path, writer, args) -> Dict:
                     imu[:t_imu, dst, :9] = ori[:t_imu, src_i].reshape(t_imu, 9)
                     imu[:t_imu, dst, 9:] = acc[:t_imu, src_i]
                     imu_mask[dst] = True
-            else:
+                desc = "TotalCapture: real 6-IMU pkl + global skeleton at 60Hz (test set)"
+            if not imu_mask.any():
                 imu, imu_mask = synthesize_imu(joints, joint_mask, 60.0)
+                quality = "synthetic_imu"
+                desc = "TotalCapture: synthesized IMU from skeleton (no real IMU found)"
 
             if t < args.min_len:
                 stats["skipped"] += 1
@@ -1020,8 +1296,7 @@ def convert_totalcapture(raw_data_root: Path, writer, args) -> Dict:
                 "totalcapture", "test",
                 f"{subject_dir.name}_{seq_name}",
                 60.0, imu, imu_mask, joints, joint_mask,
-                "primary",
-                "TotalCapture: real 6-IMU + global skeleton at 60Hz (test set)",
+                quality, desc,
                 {"joint_orient_r6d": orient6, "orient_mask": orient_mask},
             )
             if seq is None:
@@ -1039,8 +1314,16 @@ def convert_totalcapture(raw_data_root: Path, writer, args) -> Dict:
 # IMUPoser -- data/raw_data/IMUPoser/  (TEST SET)
 # ---------------------------------------------------------------------------
 
+# IMUPoser real IMU: pkl 'imu' is [T,60] = [acc(5x3) | ori(5x9)], sensor order
+# lw,rw,lp,rp,h (FIGLAB/IMUPoser config imuName2idx). acc is stored divided by
+# acc_scale=30, so x30 recovers m/s^2 (sensor at rest ~0.33 -> ~9.8). ori is the
+# calibrated global segment rotation matrix. Pockets (lp/rp) sit on the thighs.
+IMUPOSER_IMU_PLACEMENT = ["LeftHand", "RightHand", "LeftUpperLeg", "RightUpperLeg", "Head"]
+IMUPOSER_ACC_SCALE = 30.0
+
+
 def convert_imuposer(raw_data_root: Path, writer, args) -> Dict:
-    """Process IMUPoser: SMPL pose + synthesized IMU (test set)."""
+    """Process IMUPoser: SMPL GT pose + REAL 5-IMU consumer-device data (test set)."""
     ip_root = raw_data_root / "IMUPoser"
     stats = {"sequences": 0, "skipped": 0, "frames": 0}
 
@@ -1071,7 +1354,32 @@ def convert_imuposer(raw_data_root: Path, writer, args) -> Dict:
             orient6, orient_mask = root_normalized_r6d(global_rot, SMPL_JOINTS[:24])
             joints, joint_mask = _smpl_fk_positions(global_rot)
 
-            imu, imu_mask = synthesize_imu(joints, joint_mask, 60.0)
+            # Real IMU from the 5 consumer devices (lw,rw,lp,rp,h).
+            imu = torch.zeros(t, len(CANONICAL_IMUS), 12)
+            imu_mask = torch.zeros(len(CANONICAL_IMUS), dtype=torch.bool)
+            raw_imu = data.get("imu")
+            if raw_imu is not None:
+                raw_imu = torch.as_tensor(np.asarray(raw_imu), dtype=torch.float32)
+                ti = min(t, raw_imu.shape[0])
+                acc = raw_imu[:ti, :15].reshape(ti, 5, 3) * IMUPOSER_ACC_SCALE
+                ori = raw_imu[:ti, 15:].reshape(ti, 5, 3, 3)
+                for src_i, name in enumerate(IMUPOSER_IMU_PLACEMENT):
+                    dst = IMU_INDEX.get(name)
+                    if dst is None:
+                        continue
+                    imu[:ti, dst, :9] = ori[:, src_i].reshape(ti, 9)
+                    imu[:ti, dst, 9:] = acc[:, src_i]
+                    imu_mask[dst] = True
+                # align everything to the IMU length
+                if ti < t:
+                    imu = imu[:ti]; joints = joints[:ti]
+                    orient6 = orient6[:ti]; t = ti
+            if not imu_mask.any():
+                # fall back to synthesis only if the pkl has no real IMU
+                imu, imu_mask = synthesize_imu(joints, joint_mask, 60.0)
+                quality, desc = "synthetic_imu", "IMUPoser: SMPL GT + synthesized IMU (no real IMU in pkl)"
+            else:
+                quality, desc = "primary", "IMUPoser: SMPL GT pose + 5 real consumer-device IMUs at 60Hz (test set)"
 
             if t < args.min_len:
                 stats["skipped"] += 1
@@ -1081,8 +1389,7 @@ def convert_imuposer(raw_data_root: Path, writer, args) -> Dict:
                 "imuposer", "test",
                 f"{subject_dir.name}/{pkl_file.stem}",
                 60.0, imu, imu_mask, joints, joint_mask,
-                "synthetic_imu",
-                "IMUPoser: SMPL GT pose + synthesized IMU at 60Hz (test set)",
+                quality, desc,
                 {"joint_orient_r6d": orient6, "orient_mask": orient_mask},
             )
             if seq is None:
