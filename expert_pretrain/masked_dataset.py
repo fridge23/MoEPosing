@@ -18,6 +18,8 @@ import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from tqdm import tqdm
+
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
@@ -233,7 +235,7 @@ class MaskedMotionDataset(Dataset):
         self.source_valid_joints: Dict[str, set] = {}
         # index only samples that carry all requested targets + masks
         self.index = []
-        for si, p in enumerate(self.paths):
+        for si, p in enumerate(tqdm(self.paths, desc="Loading shards", unit="file")):
             for i, s in enumerate(torch.load(p, map_location="cpu")["samples"]):
                 if any(k not in s for k in self.target_keys) or any(k not in s for k in self.mask_keys):
                     continue
@@ -250,11 +252,12 @@ class MaskedMotionDataset(Dataset):
                 if valid_mask is None or not bool(valid_mask.any()):
                     continue
                 motion = str(s.get("motion", "")).lower()
+                source_name = str(s.get("source", "")).lower()
                 if split_ids is not None and seq_id(s.get("motion", "")) not in split_ids:
                     continue
-                if exclude_kw and any(k in motion for k in exclude_kw):
+                if exclude_kw and any(k in motion or k in source_name for k in exclude_kw):
                     continue
-                if include_only_kw and not any(k in motion for k in include_only_kw):
+                if include_only_kw and not any(k in motion or k in source_name for k in include_only_kw):
                     continue
                 source = str(s.get("source", Path(p).parent.parent.name))
                 self.source_available_imus.setdefault(source, set()).update(present)

@@ -1532,7 +1532,7 @@ def main():
     # DIP_IMU
     # -----------------------------------------------------------------------
     if "dip" in sources:
-        raw_data_root = data_root / "raw_data"
+        raw_data_root = data_root / "raw_data" / "raw"
         if not raw_data_root.exists():
             print(f"[DIP] {raw_data_root} not found; skipping.")
         else:
@@ -1617,7 +1617,7 @@ def main():
     # TotalCapture (test set)
     # -----------------------------------------------------------------------
     if "totalcapture" in sources:
-        raw_data_root = data_root / "raw_data"
+        raw_data_root = data_root / "raw_data" / "raw"
         print("[TotalCapture] Processing raw_data/TotalCapture ...")
         writer = {"samples": []}
         stats = convert_totalcapture(raw_data_root, writer, args)
@@ -1631,7 +1631,7 @@ def main():
     # IMUPoser (test set)
     # -----------------------------------------------------------------------
     if "imuposer" in sources:
-        raw_data_root = data_root / "raw_data"
+        raw_data_root = data_root / "raw_data" / "raw"
         print("[IMUPoser] Processing raw_data/IMUPoser ...")
         writer = {"samples": []}
         stats = convert_imuposer(raw_data_root, writer, args)
@@ -1645,7 +1645,7 @@ def main():
     # AMASS (train set, synthesized IMU, one file per subset)
     # -----------------------------------------------------------------------
     if "amass" in sources:
-        amass_root = data_root / "raw_data" / "AMASS"
+        amass_root = data_root / "raw_data" / "raw" / "AMASS"
         if not amass_root.exists():
             print(f"[AMASS] {amass_root} not found; skipping.")
         else:

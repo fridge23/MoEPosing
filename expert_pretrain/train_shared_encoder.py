@@ -19,6 +19,7 @@ import time
 
 import torch
 from torch.utils.data import DataLoader, Subset
+from tqdm import tqdm
 
 from masked_dataset import (
     MaskedMotionDataset,
@@ -142,7 +143,7 @@ def main():
     ap.add_argument("--holdout-kw", default="dip,totalcapture,imuposer")
     ap.add_argument("--val-frac", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--num-workers", type=int, default=8)
+    ap.add_argument("--num-workers", type=int, default=0)
     ap.add_argument("--preload", action="store_true")
     # noise
     ap.add_argument("--acc-noise", type=float, default=0.0)
@@ -224,22 +225,19 @@ def main():
             args.data, min_k=args.min_k, max_k=args.max_k, augment=False,
             target_key=args.target, mask_key=args.mask_key,
             exclude_kw=holdout, require_min_imus=True,
-        )
-        eval_full = MaskedMotionDataset(
-            args.data, augment=False, target_key=args.target,
-            mask_key=args.mask_key, exclude_kw=holdout,
-            require_min_imus=True,
+            preload=args.preload,
         )
         test_ds = MaskedMotionDataset(
             args.data, augment=False, target_key=args.target,
             mask_key=args.mask_key, include_only_kw=holdout,
             require_min_imus=True,
+            preload=args.preload,
         )
         n = len(train_full)
         n_val = max(1, int(n * args.val_frac))
         idx = list(range(n))
         random.Random(args.seed).shuffle(idx)
-        val_ds = Subset(eval_full, idx[:n_val])
+        val_ds = Subset(train_full, idx[:n_val])
         train_ds = Subset(train_full, idx[n_val:])
 
     # report dataset sources
@@ -261,7 +259,7 @@ def main():
     test_dl = None
     if len(test_ds):
         test_dl = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False,
-                             num_workers=2, collate_fn=collate, pin_memory=True)
+                             num_workers=args.num_workers, collate_fn=collate, pin_memory=True)
 
     print(f"[data] train={len(train_ds)} val={len(val_ds)} test={len(test_ds)} "
           f"target={args.target_keys} target_dim={args.target_dim}")
@@ -271,7 +269,7 @@ def main():
                     pin_memory=True, drop_last=True,
                     persistent_workers=args.num_workers > 0)
     vdl = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                     num_workers=2, collate_fn=collate, pin_memory=True)
+                     num_workers=args.num_workers, collate_fn=collate, pin_memory=True)
 
     # --- optimizer ---
     opt = torch.optim.AdamW(
@@ -322,12 +320,6 @@ def main():
             batch = apply_visible_imu_sampling(
                 batch, epoch=epoch, batch_idx=batch_idx, seed=args.seed,
                 min_k=args.min_k, max_k=args.max_k, split="train",
-            )
-        else:
-            batch = apply_visible_imu_sampling(
-                batch, epoch=0, batch_idx=0, seed=args.seed,
-                min_k=args.min_k, max_k=args.max_k, split="val",
-                fixed_per_dataset=True, visible_sets=eval_visible_sets,
             )
         imu = batch["imu"].to(device, non_blocking=True)
         target = batch["target"].to(device, non_blocking=True)
@@ -383,7 +375,7 @@ def main():
         ltot = otot = xtot = 0.0
         ln = 0
         with torch.no_grad():
-            for batch in loader:
+            for batch in tqdm(loader, desc="Validating", unit="batch", leave=False):
                 loss, n_, d_, xn_, xd_, o_raw, x_raw = run_batch(batch, False)
                 ltot += float(loss)
                 otot += o_raw
@@ -423,7 +415,9 @@ def main():
         t0 = time.time()
         tot = otot = xtot = 0.0
         n = 0
-        for batch_idx, batch in enumerate(dl):
+        pbar = tqdm(dl, desc=f"Epoch {epoch+1}/{args.epochs}", unit="batch",
+                    leave=False)
+        for batch_idx, batch in enumerate(pbar):
             loss, o_raw, x_raw = run_batch(batch, True, epoch=epoch,
                                            batch_idx=batch_idx)
             opt.zero_grad(set_to_none=True)
@@ -443,14 +437,16 @@ def main():
             xtot += x_raw
             n += 1
             step += 1
+            pbar.set_postfix(loss=f"{tot/n:.4f}", orient=f"{otot/n:.4f}",
+                             xyz=f"{xtot/n:.4f}", refresh=False)
 
             if args.log_every and (batch_idx + 1) % args.log_every == 0:
                 lo, lx = lossw["wo"], lossw["wx"]
-                print(f"[train] epoch={epoch+1}/{args.epochs} "
-                      f"batch={batch_idx+1}/{len(dl)} "
-                      f"loss={tot/n:.6f} orient={otot/n:.5f} xyz={xtot/n:.5f} "
-                      f"w_o={lo:.2f} w_x={lx:.2f} "
-                      f"elapsed={time.time()-t0:.1f}s", flush=True)
+                tqdm.write(f"[train] epoch={epoch+1}/{args.epochs} "
+                           f"batch={batch_idx+1}/{len(dl)} "
+                           f"loss={tot/n:.6f} orient={otot/n:.5f} xyz={xtot/n:.5f} "
+                           f"w_o={lo:.2f} w_x={lx:.2f} "
+                           f"elapsed={time.time()-t0:.1f}s")
 
             if args.max_steps and step >= args.max_steps:
                 print(f"[smoke] {step} steps ok, loss={float(loss.detach()):.6f} "
@@ -577,11 +573,6 @@ def main():
         ds_xden = defaultdict(lambda: torch.zeros(J, device=device))
         with torch.no_grad():
             for batch in test_dl:
-                batch = apply_visible_imu_sampling(
-                    batch, epoch=0, batch_idx=0, seed=args.seed,
-                    min_k=args.min_k, max_k=args.max_k, split="val",
-                    fixed_per_dataset=True, visible_sets=eval_visible_sets,
-                )
                 imu = batch["imu"].to(device, non_blocking=True)
                 target = batch["target"].to(device, non_blocking=True)
                 imu_mask = batch["imu_mask"].to(device, non_blocking=True)

@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
-"""Stage 2: train lightweight per-joint experts on frozen SharedEncoder output.
+"""Baseline: train per-joint experts DIRECTLY from raw IMU data (no shared encoder).
 
-Each expert is a 2-layer temporal Transformer + head that reads its own joint's
-slice from the shared encoder's [B,T,28,d] representation and predicts that
-joint's 9D target (6D orientation + 3D motion delta).
+Each expert is a 4-layer 64-dim Transformer:
+  - Layer 0-1: loaded from pretrained prior (student_kl), LoRA fine-tuned
+  - Layer 2-3: randomly initialized, fully trained
+  - Input: 15 IMU tokens projected to d=64
+  - Output: 1 joint's 9D prediction (6D orient + 3D motion delta)
+
+Loss: orient MSE + motion delta L1, fixed weights (same as Stage 1 & 2).
+Early stopping with patience=15.
 
 Usage:
-  # single expert
-  python train_lightweight_expert.py --target-joint left_wrist --device cuda
-
-  # all 28 experts sequentially
-  python train_lightweight_expert.py --train-all-experts --device cuda
-
-  # parallel on multiple GPUs (run each in its own shell)
-  CUDA_VISIBLE_DEVICES=0 python train_lightweight_expert.py --target-joint left_wrist
-  CUDA_VISIBLE_DEVICES=1 python train_lightweight_expert.py --target-joint right_wrist
+  python train_direct_expert.py --train-all-experts --device cuda
+  python train_direct_expert.py --target-joint left_knee --device cuda
 """
 import argparse
-import json
 import math
 import os
 import re
 import time
 
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
@@ -33,14 +31,10 @@ from masked_dataset import (
     build_fixed_visible_sets,
     collate,
 )
-from multiexpert_model import orientation_6d_loss, motion_delta_loss
 from rotation_utils import rotation_6d_to_matrix
 from schema import CANONICAL_IMUS, CANONICAL_JOINTS
-from shared_encoder_model import (
-    SharedEncoder,
-    LightweightJointExpert,
-    EXPERT_RAW_OUTPUT_DIM,
-)
+from shared_encoder_model import SinusoidalPE, _encoder_layer, load_student_layers
+from wholebody_model import LoRALinear
 from target_spec import slice_for, split_keys, target_dim
 
 import random
@@ -84,7 +78,6 @@ def r6d_to_mat(r6d):
 
 
 def geodesic_deg_single(pred6, tgt6, lengths):
-    """Geodesic angle (degrees) for a single joint: pred6/tgt6 [B,T,6]."""
     Rp, Rt = r6d_to_mat(pred6), r6d_to_mat(tgt6)
     rel = Rp.transpose(-1, -2) @ Rt
     cos = ((rel[..., 0, 0] + rel[..., 1, 1] + rel[..., 2, 2]) - 1) / 2
@@ -96,7 +89,6 @@ def geodesic_deg_single(pred6, tgt6, lengths):
 
 
 def xyz_cm_single(pred_xyz, tgt_xyz, lengths):
-    """Mean xyz distance (cm) for a single joint."""
     d = (pred_xyz - tgt_xyz).norm(dim=-1) * 100.0
     b, t = d.shape
     steps = torch.arange(t, device=d.device).view(1, t)
@@ -128,34 +120,112 @@ def add_imu_noise(imu, imu_mask, acc_std, ori_deg):
     return out
 
 
-def train_one_expert(joint_idx: int, args, encoder: SharedEncoder, device,
-                     train_ds, val_ds, eval_visible_sets, orient_slice,
-                     motion_delta_slice):
-    """Train a single lightweight expert for the given joint."""
+class DirectJointExpert(nn.Module):
+    """Per-joint expert: raw IMU -> single joint prediction (no shared encoder).
+
+    4-layer Transformer:
+      - Layer 0-1: from pretrained prior, frozen + LoRA on linear1/linear2,
+                   LayerNorms trainable
+      - Layer 2-3: randomly initialized, fully trainable
+    Input: 15 IMU tokens -> project to d -> temporal Transformer -> head -> 9D
+    """
+
+    def __init__(self, prior_path: str, d: int = 64, nhead: int = 4,
+                 ff: int = 128, lora_r: int = 8,
+                 target_dim: int = 9, dropout: float = 0.1,
+                 n_imus: int = len(CANONICAL_IMUS), imu_dim: int = 12,
+                 max_len: int = 1024):
+        super().__init__()
+        self.d = d
+        self.target_dim = target_dim
+        self.n_imus = n_imus
+
+        self.imu_proj = nn.Linear(imu_dim, d)
+        self.imu_embed = nn.Embedding(n_imus, d)
+        self.pe = SinusoidalPE(d, max_len)
+
+        # Layer 0-1: pretrained prior + LoRA
+        prior_layers = load_student_layers(prior_path, d=d, nhead=nhead,
+                                           ff=ff, num_layers=2)
+        for layer in prior_layers:
+            for p in layer.parameters():
+                p.requires_grad_(False)
+            layer.linear1 = LoRALinear(layer.linear1, r=lora_r)
+            layer.linear2 = LoRALinear(layer.linear2, r=lora_r)
+            for p in layer.norm1.parameters():
+                p.requires_grad_(True)
+            for p in layer.norm2.parameters():
+                p.requires_grad_(True)
+
+        # Layer 2-3: fully trainable
+        fresh_layers = nn.ModuleList([
+            _encoder_layer(d, nhead, ff, dropout) for _ in range(2)
+        ])
+
+        self.layers = nn.ModuleList(list(prior_layers) + list(fresh_layers))
+
+        self.head = nn.Sequential(
+            nn.LayerNorm(d), nn.Linear(d, d), nn.GELU(),
+            nn.Dropout(dropout), nn.Linear(d, target_dim),
+        )
+
+    def forward(self, imu: torch.Tensor, imu_mask: torch.Tensor,
+                lengths=None) -> torch.Tensor:
+        """imu [B,T,S,12], imu_mask [B,S] -> [B,T,target_dim]"""
+        b, t, s, _ = imu.shape
+
+        # project IMU tokens: [B,T,15,d]
+        tok = self.imu_proj(imu) + self.imu_embed(
+            torch.arange(s, device=imu.device),
+        ).view(1, 1, s, self.d)
+
+        # mean-pool visible IMU tokens per frame -> [B,T,d]
+        vis = imu_mask.bool().float().view(b, 1, s, 1)
+        x = (tok * vis).sum(dim=2) / vis.sum(dim=2).clamp_min(1.0)
+
+        x = self.pe(x)
+
+        # temporal padding mask
+        pad = None
+        if lengths is not None:
+            pad = (torch.arange(t, device=x.device).view(1, t)
+                   >= lengths.view(-1, 1))
+
+        for layer in self.layers:
+            x = layer(x, src_key_padding_mask=pad)
+
+        return self.head(x)
+
+
+def train_one_expert(joint_idx: int, args, device,
+                     train_ds, val_ds, eval_visible_sets,
+                     orient_slice, motion_delta_slice):
     joint_name = CANONICAL_JOINTS[joint_idx]
     print(f"\n{'='*60}")
-    print(f"[expert] Training joint {joint_idx:02d}: {joint_name}")
+    print(f"[direct-expert] Training joint {joint_idx:02d}: {joint_name}")
     print(f"{'='*60}")
 
-    expert = LightweightJointExpert(
-        d=args.hidden, nhead=args.nhead, ff=args.ff,
-        num_layers=args.expert_layers, target_dim=args.target_dim,
-        dropout=0.1, n_joints=len(CANONICAL_JOINTS),
-        n_imus=len(CANONICAL_IMUS), imu_dim=12,
+    expert = DirectJointExpert(
+        prior_path=args.prior, d=args.hidden, nhead=args.nhead, ff=args.ff,
+        lora_r=args.lora_r, target_dim=args.target_dim, dropout=0.1,
     ).to(device)
-    n_params = sum(p.numel() for p in expert.parameters())
-    print(f"[expert] {joint_name}: {n_params/1e3:.1f}k params, "
-          f"{args.expert_layers} layers, hidden={args.hidden}")
+    n_total = sum(p.numel() for p in expert.parameters())
+    n_train = sum(p.numel() for p in expert.parameters() if p.requires_grad)
+    print(f"[direct-expert] {joint_name}: total={n_total/1e3:.1f}k "
+          f"trainable={n_train/1e3:.1f}k (LoRA r={args.lora_r})")
 
     dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                     num_workers=args.num_workers, collate_fn=collate,
                     pin_memory=True, drop_last=True,
                     persistent_workers=args.num_workers > 0)
     vdl = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                     num_workers=args.num_workers, collate_fn=collate, pin_memory=True)
+                     num_workers=args.num_workers, collate_fn=collate,
+                     pin_memory=True)
 
-    opt = torch.optim.AdamW(expert.parameters(), lr=args.lr,
-                            weight_decay=args.weight_decay)
+    opt = torch.optim.AdamW(
+        [p for p in expert.parameters() if p.requires_grad],
+        lr=args.lr, weight_decay=args.weight_decay,
+    )
     total_steps = args.epochs * max(1, len(dl))
     cos = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=max(1, total_steps - args.warmup),
@@ -173,24 +243,6 @@ def train_one_expert(joint_idx: int, args, encoder: SharedEncoder, device,
     amp_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}.get(args.amp)
     use_amp = amp_dtype is not None and device.type == "cuda"
 
-    # adaptive loss
-    ema = {"o": None, "x": None}
-
-    def component_weights(o_raw, x_raw, train):
-        if args.loss_balance != "adaptive":
-            return args.lambda_orientation, args.lambda_motion_delta
-        ov = max(float(o_raw.detach()), 1e-8)
-        xv = max(float(x_raw.detach()), 1e-8)
-        if ema["o"] is None:
-            ema["o"], ema["x"] = ov, xv
-        wo = args.lambda_orientation
-        wx = args.xyz_weight * ema["o"] / max(ema["x"], 1e-8)
-        if train:
-            mu = args.ema_momentum
-            ema["o"] = mu * ema["o"] + (1 - mu) * ov
-            ema["x"] = mu * ema["x"] + (1 - mu) * xv
-        return wo, wx
-
     def run_batch(batch, train, epoch=0, batch_idx=0):
         if train:
             batch = apply_visible_imu_sampling(
@@ -203,7 +255,6 @@ def train_one_expert(joint_idx: int, args, encoder: SharedEncoder, device,
         mask = batch["mask"].to(device, non_blocking=True)
         lengths = batch["lengths"].to(device, non_blocking=True)
 
-        # skip batch if target joint is not available
         if not mask[:, joint_idx].any():
             return None
 
@@ -211,13 +262,9 @@ def train_one_expert(joint_idx: int, args, encoder: SharedEncoder, device,
             imu = add_imu_noise(imu, imu_mask, args.acc_noise, args.ori_noise_deg)
 
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
-            with torch.no_grad():
-                shared = encoder(imu, imu_mask, lengths)  # [B, T, 28, d]
-            # expert reads the FULL encoder output + full masked IMU, not just
-            # this joint's slice, so non-visible joints still get full context.
-            pred = expert(shared, imu, imu_mask, lengths)  # [B, T, 9]
-            target_j = target[:, :, joint_idx, :]  # [B, T, 9]
-            mask_j = mask[:, joint_idx]  # [B]
+            pred = expert(imu, imu_mask, lengths)
+            target_j = target[:, :, joint_idx, :]
+            mask_j = mask[:, joint_idx]
 
             oa, ob = orient_slice
             valid = mask_j.to(pred.dtype).view(-1, 1, 1)
@@ -227,13 +274,11 @@ def train_one_expert(joint_idx: int, args, encoder: SharedEncoder, device,
             x_raw = ((pred[..., xa:xb] - target_j[..., xa:xb]).abs() * valid).sum()
             x_raw = x_raw / valid.sum().clamp_min(1.0) / (xb - xa)
 
-            wo, wx = component_weights(o_raw, x_raw, train)
-            loss = wo * o_raw + wx * x_raw
+            loss = args.lambda_orientation * o_raw + args.lambda_motion_delta * x_raw
 
         if train:
             return loss, float(o_raw.detach()), float(x_raw.detach())
 
-        # validation: geodesic + xyz for this joint
         valid_mask = mask_j.bool()
         if valid_mask.any():
             a, b = orient_slice
@@ -275,7 +320,8 @@ def train_one_expert(joint_idx: int, args, encoder: SharedEncoder, device,
             loss, o_raw, x_raw = result
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(expert.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in expert.parameters() if p.requires_grad], 1.0)
             opt.step()
             sched.step()
             tot += float(loss.detach())
@@ -301,7 +347,6 @@ def train_one_expert(joint_idx: int, args, encoder: SharedEncoder, device,
             print(f"[warn] {joint_name}: no valid batches at epoch {epoch+1}")
             continue
 
-        # validation
         expert.eval()
         vdeg_sum = vcm_sum = 0.0
         vn = 0
@@ -356,19 +401,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", default="data60hz")
-    ap.add_argument("--encoder-checkpoint",
-                    default="weights/shared_encoder/best_encoder.pt",
-                    help="Stage 1 shared encoder checkpoint")
-    ap.add_argument("--freeze-encoder", action="store_true", default=True,
-                    help="freeze the shared encoder (default: frozen)")
-    ap.add_argument("--no-freeze-encoder", dest="freeze_encoder", action="store_false")
+    ap.add_argument("--prior", default="pretrained/student_kl_18to21_best_64.pth",
+                    help="pretrained student_kl checkpoint for layers 0-1")
     ap.add_argument("--target-joint", default="",
-                    help="joint name or index to train (e.g. 'left_wrist' or '24')")
+                    help="joint name or index to train")
     ap.add_argument("--train-all-experts", action="store_true",
                     help="train all 28 joint experts sequentially")
     # training
     ap.add_argument("--epochs", type=int, default=100)
-    ap.add_argument("--patience", type=int, default=25)
+    ap.add_argument("--patience", type=int, default=15)
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
@@ -377,17 +418,14 @@ def main():
     ap.add_argument("--hidden", type=int, default=64)
     ap.add_argument("--nhead", type=int, default=4)
     ap.add_argument("--ff", type=int, default=128)
-    ap.add_argument("--expert-layers", type=int, default=2)
+    ap.add_argument("--lora-r", type=int, default=8)
     # target
     ap.add_argument("--target", default="joint_orient_r6d,joint_delta")
     ap.add_argument("--mask-key", default="auto")
     ap.add_argument("--target-dim", type=int, default=0)
-    # loss
+    # loss (fixed weights)
     ap.add_argument("--lambda-orientation", type=float, default=1.0)
     ap.add_argument("--lambda-motion-delta", type=float, default=1.0)
-    ap.add_argument("--loss-balance", default="fixed", choices=["fixed", "adaptive"])
-    ap.add_argument("--xyz-weight", type=float, default=2.0)
-    ap.add_argument("--ema-momentum", type=float, default=0.98)
     # data
     ap.add_argument("--min-k", type=int, default=2)
     ap.add_argument("--max-k", type=int, default=5)
@@ -405,8 +443,7 @@ def main():
     ap.add_argument("--amp", default="bf16", choices=["bf16", "off"])
     ap.add_argument("--max-steps", type=int, default=0)
     # save
-    ap.add_argument("--save-dir",
-                    default="weights/joint_experts_lightweight")
+    ap.add_argument("--save-dir", default="weights/direct_experts")
     args = ap.parse_args()
 
     if not args.target_joint and not args.train_all_experts:
@@ -426,34 +463,6 @@ def main():
         raise RuntimeError("--device cuda but CUDA is not available")
     print(f"[env] device={device} cuda={torch.cuda.is_available()} "
           f"{torch.cuda.get_device_name(0) if torch.cuda.is_available() else ''}")
-
-    # --- load shared encoder ---
-    ckpt = torch.load(args.encoder_checkpoint, map_location="cpu")
-    enc_args = ckpt.get("args", {})
-    encoder = SharedEncoder(
-        d=int(enc_args.get("hidden", args.hidden)),
-        nhead=int(enc_args.get("nhead", args.nhead)),
-        ff=int(enc_args.get("ff", args.ff)),
-        num_layers=int(enc_args.get("encoder_layers", 4)),
-        num_spatial_layers=int(enc_args.get("spatial_layers", 2)),
-        dropout=0.1,
-        mask_position=str(enc_args.get("mask_position", "before")),
-    )
-    encoder.load_state_dict(ckpt["encoder"])
-    args.mask_position = str(enc_args.get("mask_position", "before"))
-    print(f"[encoder] mask_position={args.mask_position}")
-    encoder.to(device).eval()
-    if args.freeze_encoder:
-        for p in encoder.parameters():
-            p.requires_grad_(False)
-    # override hidden/nhead/ff from encoder config
-    args.hidden = encoder.d
-    args.nhead = encoder.temporal_layers[0].self_attn.num_heads
-    args.ff = encoder.temporal_layers[0].linear1.out_features
-    print(f"[encoder] loaded from {args.encoder_checkpoint} "
-          f"(epoch {ckpt.get('epoch', '?')}, "
-          f"val={ckpt.get('best_val_orient_deg', ckpt.get('val_orient_deg', '?'))}deg) "
-          f"{'frozen' if args.freeze_encoder else 'fine-tuning'}")
 
     # --- data ---
     manifest = args.manifest or None
@@ -487,6 +496,7 @@ def main():
         [val_ds], seed=args.seed, min_k=args.min_k, max_k=args.max_k,
         split="val",
     )
+
     print(f"[data] train={len(train_ds)} val={len(val_ds)} "
           f"target={args.target_keys} target_dim={args.target_dim}")
     print(f"[visible-eval] {eval_visible_sets}")
@@ -494,24 +504,26 @@ def main():
     # --- train ---
     if args.train_all_experts:
         results = {}
-        for j in range(len(CANONICAL_JOINTS)):
-            val_deg = train_one_expert(
-                j, args, encoder, device, train_ds, val_ds,
+        for ji in range(len(CANONICAL_JOINTS)):
+            deg = train_one_expert(
+                ji, args, device, train_ds, val_ds,
                 eval_visible_sets, orient_slice, motion_delta_slice,
             )
-            results[CANONICAL_JOINTS[j]] = val_deg
+            results[CANONICAL_JOINTS[ji]] = deg
 
         print(f"\n{'='*60}")
-        print(f"[summary] All 28 experts trained:")
-        for name, deg in results.items():
-            print(f"  {name:>18s}: {deg:.2f}deg")
-        valid = [d for d in results.values() if d < float("inf")]
-        if valid:
-            print(f"  {'MACRO':>18s}: {sum(valid)/len(valid):.2f}deg")
+        print("[direct-expert] All 28 experts done")
+        print(f"{'='*60}")
+        for jname, deg in results.items():
+            print(f"  {jname:20s}  val_orient={deg:.2f}deg")
+        avg = sum(v for v in results.values() if not math.isinf(v))
+        cnt = sum(1 for v in results.values() if not math.isinf(v))
+        if cnt:
+            print(f"  {'AVERAGE':20s}  val_orient={avg/cnt:.2f}deg")
     else:
-        joint_idx = resolve_joint(args.target_joint)
+        ji = resolve_joint(args.target_joint)
         train_one_expert(
-            joint_idx, args, encoder, device, train_ds, val_ds,
+            ji, args, device, train_ds, val_ds,
             eval_visible_sets, orient_slice, motion_delta_slice,
         )
 
